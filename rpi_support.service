@@ -4,8 +4,8 @@ After=basic.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -u /root/App/RPi_support/RPi_support.py
-WorkingDirectory=/root/App/RPi_support
+ExecStart=/usr/bin/python3 -u /opt/rpi_support/rpi_support.py
+WorkingDirectory=/opt/rpi_support
 StandardOutput=journal
 StandardError=journal
 Restart=always

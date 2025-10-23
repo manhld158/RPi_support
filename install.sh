@@ -52,7 +52,7 @@ install_dependencies() {
     apt-get install -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
     
     # Install Python packages
-    pip3 install psutil luma.oled pillow
+    pip3 install psutil luma.oled Pillow --break-system-packages
     
     print_status "Dependencies installed successfully."
 }

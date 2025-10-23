@@ -1,0 +1,17 @@
+[Unit]
+Description=RPi support
+After=basic.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /root/App/RPi_support/RPi_support.py
+WorkingDirectory=/root/App/RPi_support
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=3
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

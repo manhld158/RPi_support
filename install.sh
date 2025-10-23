@@ -49,7 +49,7 @@ install_dependencies() {
     apt-get install -y python3 python3-pip
     
     # Install system dependencies for the Python packages
-    apt-get install -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7 libtiff5
+    apt-get install -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
     
     # Install Python packages
     pip3 install psutil luma.oled pillow

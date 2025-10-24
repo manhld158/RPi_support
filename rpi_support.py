@@ -166,13 +166,12 @@ def draw_progress_bar(draw, xy, progress, maxProg=100, wallThick=1, gap = 0, ver
 def exit_handler(signum, frame):
     global disp, running
     
-    print(f"Exit signal: {signal}")
+    print(f"Exit signum: {signum}")
     running = False
     if disp == None:
         disp = init_display()
     
     if disp:
-        black_img = Image.new("1", (disp.width, disp.height), 0)
         disp.clear()
         disp.cleanup()
     sys.exit(0)

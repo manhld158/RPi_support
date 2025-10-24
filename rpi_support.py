@@ -44,6 +44,10 @@ class SystemStats:
     throttling_voltage: bool = False
     under_voltage_trg: bool = False
     throttling_heat_trg: bool = False
+    #POWER
+    total_power_w: float = 0.0
+    pmic_voltages: dict = field(default_factory=dict)
+    pmic_currents: dict = field(default_factory=dict)
 
 font8_sz = 8
 font8 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font8_sz)
@@ -134,6 +138,54 @@ def get_system_stat():
     tempData.under_voltage_trg = val & 0x10000
     tempData.throttling_heat_trg = val & 0x20000
     
+    #POWER - Read PMIC ADC values
+    try:
+        raw_result = subprocess.run(["vcgencmd", "pmic_read_adc"], capture_output=True, text=True)
+        pmic_output = raw_result.stdout.strip()
+        
+        total_power = 0.0
+        voltages = {}
+        currents = {}
+        
+        # Parse PMIC output
+        # Expected format: "RAIL_NAME_V=value RAIL_NAME_I=value ..."
+        for line in pmic_output.split('\n'):
+            parts = line.split()
+            for part in parts:
+                if '=' in part:
+                    key, value = part.split('=')
+                    try:
+                        val_float = float(value.rstrip('VAmW'))
+                        
+                        # Store voltage values
+                        if key.endswith('_V') or 'VOLT' in key.upper():
+                            rail_name = key.replace('_V', '').replace('VOLT', '')
+                            voltages[rail_name] = val_float
+                        
+                        # Store current values
+                        elif key.endswith('_I') or key.endswith('_A') or 'CURR' in key.upper():
+                            rail_name = key.replace('_I', '').replace('_A', '').replace('CURR', '')
+                            currents[rail_name] = val_float
+                    except ValueError:
+                        continue
+        
+        # Calculate total power for each rail where we have both voltage and current
+        for rail_name in voltages.keys():
+            if rail_name in currents:
+                # Power (W) = Voltage (V) * Current (A)
+                power = voltages[rail_name] * currents[rail_name]
+                total_power += power
+        
+        tempData.total_power_w = total_power
+        tempData.pmic_voltages = voltages
+        tempData.pmic_currents = currents
+        
+    except Exception as e:
+        print(f"Error reading PMIC ADC: {e}")
+        tempData.total_power_w = 0.0
+        tempData.pmic_voltages = {}
+        tempData.pmic_currents = {}
+    
     
     return tempData
 
@@ -163,22 +215,50 @@ def draw_progress_bar(draw, xy, progress, maxProg=100, wallThick=1, gap = 0, ver
             x2 -= progDispNon
     draw.rectangle((x1, y1, x2, y2), outline="white", fill="white")
 
+def print_power_info(sysStats):
+    """Print power consumption information to console"""
+    print("\n" + "="*50)
+    print("RASPBERRY PI POWER CONSUMPTION")
+    print("="*50)
+    
+    if sysStats.pmic_voltages or sysStats.pmic_currents:
+        print("\nPower Rails:")
+        print("-" * 50)
+        
+        # Combine all rail names
+        all_rails = set(list(sysStats.pmic_voltages.keys()) + list(sysStats.pmic_currents.keys()))
+        
+        for rail in sorted(all_rails):
+            voltage = sysStats.pmic_voltages.get(rail, 0.0)
+            current = sysStats.pmic_currents.get(rail, 0.0)
+            power = voltage * current
+            
+            print(f"{rail:20s} | V: {voltage:6.3f}V | I: {current:6.3f}A | P: {power:6.3f}W")
+        
+        print("-" * 50)
+        print(f"{'TOTAL POWER':20s} | {sysStats.total_power_w:6.3f}W")
+        print("="*50 + "\n")
+    else:
+        print("No PMIC data available (vcgencmd pmic_read_adc may not be supported)")
+        print("="*50 + "\n")
+
+
 def exit_handler(signum, frame):
     global disp, running
     
-    print(f"Exit signal: {signal}")
+    print(f"Exit signum: {signum}")
     running = False
     if disp == None:
         disp = init_display()
     
     if disp:
-        black_img = Image.new("1", (disp.width, disp.height), 0)
         disp.clear()
         disp.cleanup()
     sys.exit(0)
 
 
 #Main code
+power_print_time = time.perf_counter()
 ip_show_time = time.perf_counter()
 ip_index: int = 0
 signal.signal(signal.SIGTERM, exit_handler)
@@ -207,6 +287,12 @@ while running:
     if disp:
         try:
             sysStats = get_system_stat()
+            
+            # Print power info every 5 seconds
+            if (time.perf_counter() - power_print_time) > 5:
+                power_print_time = time.perf_counter()
+                print_power_info(sysStats)
+            
             canvas = Image.new("1", (disp.width, disp.height), "black")
             draw = ImageDraw.Draw(canvas)
             

@@ -346,7 +346,7 @@ while running:
                 canvas.paste(icon, (105, 39))
                 text_draw = f"{sysStats.power_total_w:.1f}W"
                 text_length = draw.textlength(text_draw, font=font10)
-                draw.text((110 - int(text_length / 2), 51), text_draw, font=font10, fill=255)
+                draw.text((110 - int(text_length / 2), 49), text_draw, font=font10, fill=255)
             else:
                 if sysStats.under_voltage:
                     path_icon = os.path.join(ICON_DIR, "icon_underVoltage.png")

@@ -140,11 +140,6 @@ def get_system_stat():
         tempData.voltage_rails_v = {name: float(value) for name, value in voltage_pattern.findall(text_adc)}
         tempData.power_rails_w = {name: float(curr * volt) for name, curr in tempData.current_rails_a.items() for vname, volt in tempData.voltage_rails_v.items() if name == vname}
         tempData.power_total_w = sum(tempData.power_rails_w.values())
-        print(raw_adc_result.stdout)
-        print(tempData.current_rails_a)
-        print(tempData.voltage_rails_v)
-        print(tempData.power_rails_w)
-        print(tempData.power_total_w)
 
     #ALARM
     raw_result = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True)
@@ -347,9 +342,9 @@ while running:
                     or sysStats.throttling_voltage
                     or sysStats.under_voltage_trg
                     or sysStats.throttling_heat_trg):
-                path_icon = os.path.join(ICON_DIR, "icon_goodState.png")
-                icon = Image.open(path_icon).convert("1")
-                canvas.paste(icon, (102, 42))
+                text_draw = f"{sysStats.power_total_w:.2f}W"
+                text_length = draw.textlength(text_draw, font=font12)
+                draw.text((110 - int(text_length / 2), 48), text_draw, font=font12, fill=255)
             else:
                 if sysStats.under_voltage:
                     path_icon = os.path.join(ICON_DIR, "icon_underVoltage.png")

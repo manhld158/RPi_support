@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, "assets", "png")
 DISP_REF_INTERVAL = 1 #Interval 1sec
+IP_SHOW_TIME = 5 #Seconds to show each IP
 OLED_W = 128
 OLED_H = 64
 
@@ -54,8 +55,6 @@ font8_sz = 8
 font8 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font8_sz)
 font10_sz = 10
 font10 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font10_sz)
-font12_sz = 12
-font12 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font12_sz)
 
 running = True
 sleepTime = DISP_REF_INTERVAL
@@ -309,7 +308,7 @@ while running:
                     ip_addr = sysStats.ip_internet
                 else:
                     ip_name, ip_addr = sysStats.ip_list[ip_index]
-                if (time.perf_counter() - ip_show_time) > 3:
+                if (time.perf_counter() - ip_show_time) > IP_SHOW_TIME:
                     ip_show_time = time.perf_counter()
                     ip_index = (ip_index + 1) % (ip_numb + 1)
             ip_name = ip_name[:4]
@@ -342,9 +341,12 @@ while running:
                     or sysStats.throttling_voltage
                     or sysStats.under_voltage_trg
                     or sysStats.throttling_heat_trg):
-                text_draw = f"{sysStats.power_total_w:.2f}W"
-                text_length = draw.textlength(text_draw, font=font12)
-                draw.text((110 - int(text_length / 2), 48), text_draw, font=font12, fill=255)
+                path_icon = os.path.join(ICON_DIR, "icon_power.png")
+                icon = Image.open(path_icon).convert("1")
+                canvas.paste(icon, (105, 39))
+                text_draw = f"{sysStats.power_total_w:.1f}W"
+                text_length = draw.textlength(text_draw, font=font10)
+                draw.text((110 - int(text_length / 2), 51), text_draw, font=font10, fill=255)
             else:
                 if sysStats.under_voltage:
                     path_icon = os.path.join(ICON_DIR, "icon_underVoltage.png")

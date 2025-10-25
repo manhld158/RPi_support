@@ -135,11 +135,11 @@ def get_system_stat():
     if raw_adc_result.returncode == 0:
         current_pattern = re.compile(r"([\w\d_]+)_A\s+current\(\d+\)=([0-9]*\.?[0-9]+)A")
         voltage_pattern = re.compile(r"([\w\d_]+)_V\s+voltage\(\d+\)=([0-9]*\.?[0-9]+)V")
-        tempData.current_rails_a = {name: float(value) for name, value in current_pattern.findall(raw_adc_result)}
-        tempData.voltage_rails_v = {name: float(value) for name, value in voltage_pattern.findall(raw_adc_result)}
+        tempData.current_rails_a = {name: float(value) for name, value in current_pattern.findall(raw_adc_result.stdout)}
+        tempData.voltage_rails_v = {name: float(value) for name, value in voltage_pattern.findall(raw_adc_result.stdout)}
         tempData.power_rails_w = {name: float(curr * volt) for name, curr in tempData.current_rails_a.items() for vname, volt in tempData.voltage_rails_v.items() if name == vname}
         tempData.power_total_w = sum(tempData.power_rails_w.values())
-        print(raw_adc_result)
+        print(raw_adc_result.stdout)
         print(tempData.current_rails_a)
         print(tempData.voltage_rails_v)
         print(tempData.power_total_w)

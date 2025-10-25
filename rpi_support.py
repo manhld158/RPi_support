@@ -38,6 +38,11 @@ class SystemStats:
     ip_internet: str = ""
     download_speed_mbps: float = 0.0
     upload_speed_mbps: float = 0.0
+    #POWER
+    power_total_w: float = 0.0
+    power_rails_w: dict[str, float] = field(default_factory=dict)
+    current_rails_a: dict[str, float] = field(default_factory=dict)
+    voltage_rails_v: dict[str, float] = field(default_factory=dict)
     #ALARM
     under_voltage: bool = False
     throttling_heat: bool = False
@@ -125,6 +130,20 @@ def get_system_stat():
     tempData.upload_speed_mbps = ((new_network_vl.bytes_sent - old_network_vl.bytes_sent) / duration) * 8.0 / 1_000_000.0
     old_network_vl = new_network_vl
     
+    #POWER
+    raw_adc_result = subprocess.run(["vcgencmd", "pmic_read_adc"], capture_output=True, text=True)
+    if raw_adc_result.returncode == 0:
+        current_pattern = re.compile(r"([\w\d_]+)_A\s+current\(\d+\)=([0-9]*\.?[0-9]+)A")
+        voltage_pattern = re.compile(r"([\w\d_]+)_V\s+voltage\(\d+\)=([0-9]*\.?[0-9]+)V")
+        tempData.current_rails_a = {name: float(value) for name, value in current_pattern.findall(raw_adc_result)}
+        tempData.voltage_rails_v = {name: float(value) for name, value in voltage_pattern.findall(raw_adc_result)}
+        tempData.power_rails_w = {name: float(curr * volt) for name, curr in tempData.current_rails_a.items() for vname, volt in tempData.voltage_rails_v.items() if name == vname}
+        tempData.power_total_w = sum(tempData.power_rails_w.values())
+        print(raw_adc_result)
+        print(tempData.current_rails_a)
+        print(tempData.voltage_rails_v)
+        print(tempData.power_total_w)
+
     #ALARM
     raw_result = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True)
     val = int(raw_result.stdout.strip().split("=")[1], 16)

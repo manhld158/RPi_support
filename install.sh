@@ -154,6 +154,44 @@ remove_installation() {
     print_status "${SERVICE_NAME} has been completely removed."
 }
 
+# Function to remove installation and all dependencies
+remove_all() {
+    print_status "Removing ${SERVICE_NAME} installation and all dependencies..."
+    
+    # First remove the service installation
+    remove_installation
+    
+    # Remove Python packages
+    print_status "Removing Python packages..."
+    pip3 uninstall -y psutil luma.oled Pillow 2>/dev/null || true
+    
+    # Ask user if they want to remove system packages
+    echo ""
+    print_warning "The following system packages will be removed:"
+    print_warning "  - python3-dev"
+    print_warning "  - build-essential"
+    print_warning "  - libfreetype6-dev"
+    print_warning "  - libjpeg-dev"
+    print_warning "  - libopenjp2-7"
+    echo ""
+    print_warning "Note: python3 and python3-pip will NOT be removed as they may be used by other applications."
+    echo ""
+    read -p "Do you want to remove these system packages? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        print_status "Removing system packages..."
+        apt-get remove -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
+        apt-get autoremove -y
+        print_status "System packages removed."
+    else
+        print_status "System packages kept."
+    fi
+    
+    print_status "============================================"
+    print_status "Complete removal finished!"
+    print_status "============================================"
+}
+
 # Function to show service status
 show_status() {
     echo "=== ${SERVICE_NAME} Service Status ==="
@@ -178,14 +216,15 @@ show_status() {
 
 # Function to show usage
 show_usage() {
-    echo "Usage: $0 [install|remove|status|restart|logs]"
+    echo "Usage: $0 [install|remove|remove-all|status|restart|logs]"
     echo ""
     echo "Commands:"
-    echo "  install  - Install the ${SERVICE_NAME} service"
-    echo "  remove   - Remove the ${SERVICE_NAME} service completely"
-    echo "  status   - Show service status and recent logs"
-    echo "  restart  - Restart the service"
-    echo "  logs     - Show live logs from the service"
+    echo "  install    - Install the ${SERVICE_NAME} service"
+    echo "  remove     - Remove the ${SERVICE_NAME} service completely"
+    echo "  remove-all - Remove the ${SERVICE_NAME} service and all dependencies"
+    echo "  status     - Show service status and recent logs"
+    echo "  restart    - Restart the service"
+    echo "  logs       - Show live logs from the service"
     echo ""
     echo "If no command is specified, 'install' will be executed."
 }
@@ -244,6 +283,10 @@ case "${1:-install}" in
     remove)
         check_root
         remove_installation
+        ;;
+    remove-all)
+        check_root
+        remove_all
         ;;
     status)
         show_status

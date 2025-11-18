@@ -12,6 +12,7 @@ from luma.core.error import DeviceNotFoundError
 from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass, field
+from assets.INA219 import INA219
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, "assets", "png")
@@ -44,6 +45,10 @@ class SystemStats:
     power_rails_w: dict[str, float] = field(default_factory=dict)
     current_rails_a: dict[str, float] = field(default_factory=dict)
     voltage_rails_v: dict[str, float] = field(default_factory=dict)
+    #INA219
+    ina219_voltage_v: float = 0.0
+    ina219_current_a: float = 0.0
+    ina219_power_w: float = 0.0
     #ALARM
     under_voltage: bool = False
     throttling_heat: bool = False
@@ -57,7 +62,14 @@ font10_sz = 10
 font10 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font10_sz)
 
 running = True
-sleepTime = DISP_REF_INTERVAL
+
+# Initialize INA219
+ina219_sensor = None
+try:
+    ina219_sensor = INA219(i2c_bus=1, addr=0x40)
+    print("INA219 initialized successfully")
+except Exception as e:
+    print(f"INA219 initialization failed: {e}")
 
 def init_display(width = OLED_W, height = OLED_H):
     try:
@@ -139,6 +151,18 @@ def get_system_stat():
         tempData.voltage_rails_v = {name: float(value) for name, value in voltage_pattern.findall(text_adc)}
         tempData.power_rails_w = {name: float(curr * volt) for name, curr in tempData.current_rails_a.items() for vname, volt in tempData.voltage_rails_v.items() if name == vname}
         tempData.power_total_w = sum(tempData.power_rails_w.values())
+    
+    #INA219 POWER MEASUREMENT
+    global ina219_sensor
+    if ina219_sensor:
+        try:
+            tempData.ina219_voltage_v = ina219_sensor.getBusVoltage_V()
+            tempData.ina219_current_a = ina219_sensor.getCurrent_mA() / 1000.0
+            tempData.ina219_power_w = ina219_sensor.getPower_W()
+            # Add INA219 power to total power
+            tempData.power_total_w += tempData.ina219_power_w
+        except Exception as e:
+            print(f"INA219 read error: {e}")
 
     #ALARM
     raw_result = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True)
@@ -191,6 +215,57 @@ def exit_handler(signum, frame):
         disp.cleanup()
     sys.exit(0)
 
+def log_stat_monitor(stats: SystemStats):
+    # Đếm số dòng sẽ in
+    lines = []
+    lines.append("")
+    lines.append("-" * 40)
+    lines.append("CPU: {:.1f}GHz {:.1f}% {:.1f}C".format(
+        stats.cpu_freq_ghz,
+        stats.cpu_percent,
+        stats.cpu_temp_c))
+    lines.append("RAM: {:.2f}/{:.2f}GB {:.1f}%".format(
+        stats.ram_used_gb,
+        stats.ram_total_gb,
+        stats.ram_percent))
+    lines.append("DISK: {:.2f}/{:.2f}GB {:.1f}%".format(
+        stats.disk_used_gb,
+        stats.disk_total_gb,
+        stats.disk_percent))
+    
+    network_line = "NETWORK: IPs: "
+    for ifname, ip in stats.ip_list:
+        network_line += f"{ifname}:{ip}; "
+    network_line += f"Internet:{stats.ip_internet}"
+    lines.append(network_line)
+    
+    lines.append(" DL: {:.2f}Mbps UL: {:.2f}Mbps".format(
+        stats.download_speed_mbps,
+        stats.upload_speed_mbps))
+    lines.append("POWER: Total: {:.1f}W".format(stats.power_total_w))
+    
+    for rail, power in stats.power_rails_w.items():
+        lines.append("  {}: {:.2f}W".format(rail, power))
+    
+    if stats.ina219_voltage_v > 0 or stats.ina219_current_a > 0 or stats.ina219_power_w > 0:
+        lines.append("INA219: Voltage: {:.3f}V Current: {:.3f}A Power: {:.3f}W".format(
+            stats.ina219_voltage_v,
+            stats.ina219_current_a,
+            stats.ina219_power_w))
+    
+    lines.append("ALARMS: UV:{} TH:{} TV:{} UVT:{} THT:{}".format(
+        stats.under_voltage,
+        stats.throttling_heat,
+        stats.throttling_voltage,
+        stats.under_voltage_trg,
+        stats.throttling_heat_trg))
+    
+    # In tất cả các dòng
+    for line in lines:
+        print(line)
+    
+    # Di chuyển con trỏ lên để cập nhật tại chỗ lần sau
+    print(f"\33[{len(lines)}A", end="")
 
 #Main code
 ip_show_time = time.perf_counter()
@@ -218,9 +293,15 @@ while running:
     if disp == None:
         disp = init_display()
     
+    try:
+        sysStats = get_system_stat()
+    except Exception as e:
+        print("Get stats error:", e)
+    else:
+        log_stat_monitor(sysStats)
+
     if disp:
         try:
-            sysStats = get_system_stat()
             canvas = Image.new("1", (disp.width, disp.height), "black")
             draw = ImageDraw.Draw(canvas)
             
@@ -377,8 +458,4 @@ while running:
         except Exception as e:
             print("Try display system stat error:", e)
     
-    if disp:
-        sleepTime = DISP_REF_INTERVAL
-    else:
-        sleepTime = DISP_REF_INTERVAL / 2
-    sleep(sleepTime)
+    sleep(DISP_REF_INTERVAL)

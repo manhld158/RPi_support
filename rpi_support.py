@@ -216,6 +216,9 @@ def exit_handler(signum, frame):
     sys.exit(0)
 
 def log_stat_monitor(stats: SystemStats):
+    # Kiểm tra xem có phải đang chạy trong terminal tương tác không
+    is_interactive = sys.stdout.isatty()
+    
     # Đếm số dòng sẽ in
     lines = []
     lines.append("")
@@ -260,12 +263,22 @@ def log_stat_monitor(stats: SystemStats):
         stats.under_voltage_trg,
         stats.throttling_heat_trg))
     
-    # In tất cả các dòng
-    for line in lines:
-        print(line)
-    
-    # Di chuyển con trỏ lên để cập nhật tại chỗ lần sau
-    print(f"\33[{len(lines)}A", end="")
+    if is_interactive:
+        # Nếu chạy trong terminal tương tác, dùng ANSI escape codes để in đè
+        for line in lines:
+            print(line)
+        # Di chuyển con trỏ lên để cập nhật tại chỗ lần sau
+        print(f"\033[{len(lines)}A", end="", flush=True)
+    else:
+        # Nếu chạy như systemd service, chỉ in log tóm tắt 1 dòng
+        summary = (f"CPU:{stats.cpu_percent:.1f}% {stats.cpu_temp_c:.1f}C | "
+                  f"RAM:{stats.ram_percent:.1f}% | "
+                  f"DISK:{stats.disk_percent:.1f}% | "
+                  f"NET: DL:{stats.download_speed_mbps:.2f}Mbps UL:{stats.upload_speed_mbps:.2f}Mbps | "
+                  f"PWR:{stats.power_total_w:.1f}W")
+        if stats.ina219_voltage_v > 0:
+            summary += f" | INA219:{stats.ina219_voltage_v:.2f}V {stats.ina219_current_a:.3f}A"
+        print(summary)
 
 #Main code
 ip_show_time = time.perf_counter()

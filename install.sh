@@ -38,6 +38,48 @@ check_root() {
     fi
 }
 
+# Function to enable I2C interface on Raspberry Pi
+enable_i2c() {
+    print_status "Enabling I2C interface..."
+    
+    # Check if raspi-config is available (Raspberry Pi specific)
+    if command -v raspi-config &> /dev/null; then
+        # Enable I2C using raspi-config
+        raspi-config nonint do_i2c 0
+        print_status "I2C interface enabled via raspi-config."
+    else
+        # Fallback: manually enable I2C in /boot/config.txt
+        if [ -f /boot/config.txt ]; then
+            if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt; then
+                echo "dtparam=i2c_arm=on" >> /boot/config.txt
+                print_status "I2C enabled in /boot/config.txt"
+            else
+                print_status "I2C already enabled in /boot/config.txt"
+            fi
+        elif [ -f /boot/firmware/config.txt ]; then
+            if ! grep -q "^dtparam=i2c_arm=on" /boot/firmware/config.txt; then
+                echo "dtparam=i2c_arm=on" >> /boot/firmware/config.txt
+                print_status "I2C enabled in /boot/firmware/config.txt"
+            else
+                print_status "I2C already enabled in /boot/firmware/config.txt"
+            fi
+        else
+            print_warning "Could not find config.txt to enable I2C"
+        fi
+        
+        # Load I2C kernel modules
+        if ! grep -q "^i2c-dev" /etc/modules; then
+            echo "i2c-dev" >> /etc/modules
+            print_status "Added i2c-dev to /etc/modules"
+        fi
+        
+        # Load modules now
+        modprobe i2c-dev 2>/dev/null || print_warning "Could not load i2c-dev module"
+    fi
+    
+    print_status "I2C configuration completed."
+}
+
 # Function to install required packages
 install_dependencies() {
     print_status "Installing required packages..."
@@ -50,6 +92,12 @@ install_dependencies() {
     
     # Install system dependencies for the Python packages
     apt-get install -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
+    
+    # Install I2C tools and SMBus library for INA219 sensor
+    apt-get install -y i2c-tools python3-smbus
+    
+    # Install DejaVu fonts (required by the application)
+    apt-get install -y fonts-dejavu-core
     
     # Install Python packages
     pip3 install psutil luma.oled Pillow --break-system-packages
@@ -173,6 +221,9 @@ remove_all() {
     print_warning "  - libfreetype6-dev"
     print_warning "  - libjpeg-dev"
     print_warning "  - libopenjp2-7"
+    print_warning "  - i2c-tools"
+    print_warning "  - python3-smbus"
+    print_warning "  - fonts-dejavu-core"
     echo ""
     print_warning "Note: python3 and python3-pip will NOT be removed as they may be used by other applications."
     echo ""
@@ -180,7 +231,7 @@ remove_all() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         print_status "Removing system packages..."
-        apt-get remove -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
+        apt-get remove -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7 i2c-tools python3-smbus fonts-dejavu-core
         apt-get autoremove -y
         print_status "System packages removed."
     else
@@ -256,6 +307,7 @@ main_install() {
     fi
     
     install_dependencies
+    enable_i2c
     install_files
     install_service
     start_service
@@ -266,6 +318,9 @@ main_install() {
     print_status "Service name: $SERVICE_NAME"
     print_status "Installation path: $INSTALL_DIR"
     print_status "Service file: $SERVICE_FILE"
+    print_status ""
+    print_warning "IMPORTANT: A reboot is recommended for I2C changes to take full effect."
+    print_warning "You can reboot now with: sudo reboot"
     print_status ""
     print_status "Useful commands:"
     print_status "  Check status: sudo systemctl status $SERVICE_NAME"

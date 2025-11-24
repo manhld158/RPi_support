@@ -38,43 +38,161 @@ check_root() {
     fi
 }
 
+# Function to check if I2C is already enabled
+is_i2c_enabled() {
+    # Check if I2C kernel module is loaded
+    if lsmod | grep -q "^i2c_dev"; then
+        # Check if I2C device files exist
+        if [ -e /dev/i2c-0 ] || [ -e /dev/i2c-1 ]; then
+            return 0  # I2C is enabled
+        fi
+    fi
+    return 1  # I2C is not enabled
+}
+
+# Function to check if I2C is enabled in config.txt
+is_i2c_in_config() {
+    local config_file="$1"
+    
+    if [ ! -f "$config_file" ]; then
+        return 1  # File doesn't exist
+    fi
+    
+    # Check for enabled I2C (uncommented line)
+    if grep -q "^[[:space:]]*dtparam=i2c_arm=on" "$config_file"; then
+        return 0  # I2C is enabled in config
+    fi
+    
+    return 1  # I2C is not enabled in config
+}
+
 # Function to enable I2C interface on Raspberry Pi
 enable_i2c() {
-    print_status "Enabling I2C interface..."
+    print_status "Checking I2C interface status..."
+    
+    # First check if I2C is already working
+    if is_i2c_enabled; then
+        print_status "I2C interface is already enabled and working."
+        
+        # Verify with i2cdetect if available
+        if command -v i2cdetect &> /dev/null; then
+            print_status "I2C buses detected:"
+            i2cdetect -l 2>/dev/null || true
+        fi
+        
+        return 0
+    fi
+    
+    print_status "I2C interface is not enabled. Enabling now..."
     
     # Check if raspi-config is available (Raspberry Pi specific)
     if command -v raspi-config &> /dev/null; then
-        # Enable I2C using raspi-config
-        raspi-config nonint do_i2c 0
-        print_status "I2C interface enabled via raspi-config."
-    else
-        # Fallback: manually enable I2C in /boot/config.txt
-        if [ -f /boot/config.txt ]; then
-            if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt; then
-                echo "dtparam=i2c_arm=on" >> /boot/config.txt
-                print_status "I2C enabled in /boot/config.txt"
-            else
-                print_status "I2C already enabled in /boot/config.txt"
-            fi
-        elif [ -f /boot/firmware/config.txt ]; then
-            if ! grep -q "^dtparam=i2c_arm=on" /boot/firmware/config.txt; then
-                echo "dtparam=i2c_arm=on" >> /boot/firmware/config.txt
-                print_status "I2C enabled in /boot/firmware/config.txt"
-            else
-                print_status "I2C already enabled in /boot/firmware/config.txt"
-            fi
+        print_status "Using raspi-config to enable I2C..."
+        
+        # Enable I2C using raspi-config (non-interactive mode)
+        if raspi-config nonint do_i2c 0; then
+            print_status "I2C interface enabled via raspi-config."
         else
-            print_warning "Could not find config.txt to enable I2C"
+            print_error "Failed to enable I2C via raspi-config. Trying manual method..."
         fi
         
-        # Load I2C kernel modules
-        if ! grep -q "^i2c-dev" /etc/modules; then
-            echo "i2c-dev" >> /etc/modules
-            print_status "Added i2c-dev to /etc/modules"
+    else
+        print_warning "raspi-config not found. Using manual configuration..."
+        
+        # Determine which config file to use
+        local config_file=""
+        if [ -f /boot/firmware/config.txt ]; then
+            config_file="/boot/firmware/config.txt"
+        elif [ -f /boot/config.txt ]; then
+            config_file="/boot/config.txt"
+        else
+            print_error "Could not find config.txt file."
+            return 1
         fi
         
-        # Load modules now
-        modprobe i2c-dev 2>/dev/null || print_warning "Could not load i2c-dev module"
+        print_status "Using config file: $config_file"
+        
+        # Check if I2C is already in config (but maybe commented out)
+        if is_i2c_in_config "$config_file"; then
+            print_status "I2C is already enabled in $config_file"
+        else
+            # Check if there's a commented I2C line
+            if grep -q "^[[:space:]]*#.*dtparam=i2c_arm" "$config_file"; then
+                # Uncomment existing I2C line
+                print_status "Uncommenting existing I2C configuration..."
+                sed -i 's/^[[:space:]]*#[[:space:]]*\(dtparam=i2c_arm=on\)/\1/' "$config_file"
+            else
+                # Add new I2C configuration
+                print_status "Adding I2C configuration to $config_file..."
+                
+                # Check if there's a [all] section
+                if grep -q "^\[all\]" "$config_file"; then
+                    # Add after [all] section
+                    sed -i '/^\[all\]/a dtparam=i2c_arm=on' "$config_file"
+                else
+                    # Just append to end of file
+                    echo "" >> "$config_file"
+                    echo "# Enable I2C interface" >> "$config_file"
+                    echo "dtparam=i2c_arm=on" >> "$config_file"
+                fi
+            fi
+            
+            print_status "I2C enabled in $config_file"
+        fi
+        
+        # Configure I2C kernel module
+        print_status "Configuring I2C kernel module..."
+        
+        # Check if i2c-dev is already in /etc/modules
+        if grep -q "^[[:space:]]*i2c-dev" /etc/modules; then
+            print_status "i2c-dev already in /etc/modules"
+        else
+            # Check if there's a commented i2c-dev line
+            if grep -q "^[[:space:]]*#.*i2c-dev" /etc/modules; then
+                print_status "Uncommenting i2c-dev in /etc/modules..."
+                sed -i 's/^[[:space:]]*#[[:space:]]*\(i2c-dev\)/\1/' /etc/modules
+            else
+                print_status "Adding i2c-dev to /etc/modules..."
+                echo "i2c-dev" >> /etc/modules
+            fi
+        fi
+        
+        # Try to load module now (will fail gracefully if already loaded)
+        print_status "Loading i2c-dev kernel module..."
+        if modprobe i2c-dev 2>/dev/null; then
+            print_status "i2c-dev module loaded successfully."
+        else
+            print_warning "Could not load i2c-dev module now. It will load after reboot."
+        fi
+        
+        # Try to load i2c-bcm2835 for Raspberry Pi (optional)
+        if modprobe i2c-bcm2835 2>/dev/null; then
+            print_status "i2c-bcm2835 module loaded successfully."
+        fi
+    fi
+    
+    # Final verification
+    print_status "Verifying I2C configuration..."
+    sleep 1
+    
+    if is_i2c_enabled; then
+        print_status "✓ I2C interface is now enabled and working!"
+        
+        # Show detected I2C buses
+        if command -v i2cdetect &> /dev/null; then
+            echo ""
+            print_status "Detected I2C buses:"
+            i2cdetect -l 2>/dev/null || true
+            echo ""
+        fi
+        
+        # Show loaded modules
+        print_status "Loaded I2C modules:"
+        lsmod | grep i2c || print_warning "No I2C modules shown (may require reboot)"
+        
+    else
+        print_warning "I2C configuration completed, but interface is not active yet."
+        print_warning "A reboot is required for changes to take effect."
     fi
     
     print_status "I2C configuration completed."

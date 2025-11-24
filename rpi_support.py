@@ -216,10 +216,10 @@ def exit_handler(signum, frame):
     sys.exit(0)
 
 def log_stat_monitor(stats: SystemStats):
-    # Kiểm tra xem có phải đang chạy trong terminal tương tác không
+    # Check if running in an interactive terminal
     is_interactive = sys.stdout.isatty()
     
-    # Đếm số dòng sẽ in
+    # Count the number of lines to print
     lines = []
     lines.append("")
     lines.append("-" * 40)
@@ -264,13 +264,13 @@ def log_stat_monitor(stats: SystemStats):
         stats.throttling_heat_trg))
     
     if is_interactive:
-        # Nếu chạy trong terminal tương tác, dùng ANSI escape codes để in đè
+        # If running in an interactive terminal, use ANSI escape codes to overwrite
         for line in lines:
             print(line)
-        # Di chuyển con trỏ lên để cập nhật tại chỗ lần sau
+        # Move the cursor up to update in place next time
         print(f"\033[{len(lines)}A", end="", flush=True)
     else:
-        # Nếu chạy như systemd service, chỉ in log tóm tắt 1 dòng
+        # If running as a systemd service, only print a one-line summary
         summary = (f"CPU:{stats.cpu_percent:.1f}% {stats.cpu_temp_c:.1f}C | "
                   f"RAM:{stats.ram_percent:.1f}% | "
                   f"DISK:{stats.disk_percent:.1f}% | "

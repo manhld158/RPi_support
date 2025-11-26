@@ -322,43 +322,9 @@ remove_installation() {
 
 # Function to remove installation and all dependencies
 remove_all() {
-    print_status "Removing ${SERVICE_NAME} installation and all dependencies..."
-    
-    # First remove the service installation
+    print_warning "Remove all no longer support!"
+    print_status "Switch to normal removal"
     remove_installation
-    
-    # Remove Python packages
-    print_status "Removing Python packages..."
-    pip3 uninstall -y psutil luma.oled Pillow 2>/dev/null || true
-    
-    # Ask user if they want to remove system packages
-    echo ""
-    print_warning "The following system packages will be removed:"
-    print_warning "  - python3-dev"
-    print_warning "  - build-essential"
-    print_warning "  - libfreetype6-dev"
-    print_warning "  - libjpeg-dev"
-    print_warning "  - libopenjp2-7"
-    print_warning "  - i2c-tools"
-    print_warning "  - python3-smbus"
-    print_warning "  - fonts-dejavu-core"
-    echo ""
-    print_warning "Note: python3 and python3-pip will NOT be removed as they may be used by other applications."
-    echo ""
-    read -p "Do you want to remove these system packages? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        print_status "Removing system packages..."
-        apt-get remove -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7 i2c-tools python3-smbus fonts-dejavu-core
-        apt-get autoremove -y
-        print_status "System packages removed."
-    else
-        print_status "System packages kept."
-    fi
-    
-    print_status "============================================"
-    print_status "Complete removal finished!"
-    print_status "============================================"
 }
 
 # Function to show service status

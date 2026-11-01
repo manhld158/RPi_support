@@ -1,4 +1,5 @@
 import os
+import atexit
 import sys
 import socket
 import psutil
@@ -13,6 +14,7 @@ from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass, field
 from assets.INA219 import INA219
+from assets.fan_control import FanService
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, "assets", "png")
@@ -62,6 +64,7 @@ font10_sz = 10
 font10 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font10_sz)
 
 running = True
+fan_service = None
 
 # Initialize INA219
 ina219_sensor = None
@@ -202,11 +205,37 @@ def draw_progress_bar(draw, xy, progress, maxProg=100, wallThick=1, gap = 0, ver
             x2 -= progDispNon
     draw.rectangle((x1, y1, x2, y2), outline="white", fill="white")
 
+def update_health_status(healthy):
+    """Publish recent successful collection for this process, when run as a service."""
+    health_path = os.environ.get("RPI_SUPPORT_HEALTH_FILE")
+    if not health_path:
+        return
+    temporary_path = f"{health_path}.{os.getpid()}.tmp"
+    try:
+        if healthy:
+            with open(temporary_path, "w", encoding="ascii") as health_file:
+                health_file.write(f"{os.getpid()} {int(time.time())}\n")
+            os.replace(temporary_path, health_path)
+        else:
+            try:
+                os.unlink(health_path)
+            except FileNotFoundError:
+                pass
+    except OSError as error:
+        print(f"Health status update failed: {error}")
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+
+
 def exit_handler(signum, frame):
     global disp, running
     
     print(f"Exit signum: {signum}")
     running = False
+    update_health_status(False)
     if disp == None:
         disp = init_display()
     
@@ -246,6 +275,9 @@ def log_stat_monitor(stats: SystemStats):
         stats.download_speed_mbps,
         stats.upload_speed_mbps))
     lines.append("POWER: Total: {:.1f}W".format(stats.power_total_w))
+    fan_state = fan_service.snapshot() if fan_service is not None else None
+    if fan_state is not None:
+        lines.append("FANS: MAIN:{main}% DISK:{disk}% CONVECTION:{convection}% HDD:{disk_max_c}C".format(**fan_state))
     
     for rail, power in stats.power_rails_w.items():
         lines.append("  {}: {:.2f}W".format(rail, power))
@@ -278,6 +310,8 @@ def log_stat_monitor(stats: SystemStats):
                   f"PWR:{stats.power_total_w:.1f}W")
         if stats.ina219_voltage_v > 0:
             summary += f" | INA219:{stats.ina219_voltage_v:.2f}V {stats.ina219_current_a:.3f}A"
+        if fan_state is not None:
+            summary += " | FANS:{main}/{disk}/{convection}% HDD:{disk_max_c}C".format(**fan_state)
         print(summary)
 
 #Main code
@@ -285,6 +319,10 @@ ip_show_time = time.perf_counter()
 ip_index: int = 0
 signal.signal(signal.SIGTERM, exit_handler)
 signal.signal(signal.SIGINT, exit_handler)
+update_health_status(False)
+fan_service = FanService.from_environment()
+if fan_service is not None:
+    atexit.register(fan_service.stop)
 disp = init_display()
 
 if disp != None:
@@ -310,8 +348,12 @@ while running:
         sysStats = get_system_stat()
     except Exception as e:
         print("Get stats error:", e)
+        update_health_status(False)
+        sleep(DISP_REF_INTERVAL)
+        continue
     else:
         log_stat_monitor(sysStats)
+        update_health_status(fan_service is None or fan_service.healthy)
 
     if disp:
         try:

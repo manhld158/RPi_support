@@ -4,7 +4,7 @@ After=basic.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -u /opt/rpi_support/rpi_support.py
+ExecStart=/opt/rpi_support/.venv/bin/python -u /opt/rpi_support/rpi_support.py
 WorkingDirectory=/opt/rpi_support
 StandardOutput=journal
 StandardError=journal
@@ -12,6 +12,10 @@ Restart=always
 RestartSec=3
 User=root
 Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=rpi_support
+Environment=RPI_SUPPORT_HEALTH_FILE=/run/rpi_support/health
+Environment=RPI_SUPPORT_PWM_HZ=25000
+EnvironmentFile=-/etc/default/rpi_support
 
 [Install]
 WantedBy=multi-user.target

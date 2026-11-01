@@ -1,0 +1,34 @@
+/dts-v1/;
+/plugin/;
+
+/* Raspberry Pi 5 / RP1: BCM13=PWM0_CHAN1, BCM18=CHAN2, BCM19=CHAN3. */
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target = <&rp1_gpio>;
+        __overlay__ {
+            rpi_support_fan_pins: rpi_support_fan_pins {
+                function = "pwm0";
+                pins = "gpio13", "gpio18", "gpio19";
+                bias-pull-down;
+            };
+        };
+    };
+
+    fragment@1 {
+        target = <&rp1_pwm0>;
+        __overlay__ {
+            pinctrl-names = "default";
+            pinctrl-0 = <&rpi_support_fan_pins>;
+            status = "okay";
+        };
+    };
+
+    fragment@2 {
+        target-path = "/";
+        __overlay__ {
+            rpi-support-fans;
+        };
+    };
+};

@@ -1,4 +1,4 @@
-import smbus
+import smbus2 as smbus
 import time
 
 # Config Register (R/W)
@@ -65,7 +65,20 @@ class INA219:
         self._cal_value = 0
         self._current_lsb = 0
         self._power_lsb = 0
-        self.set_calibration_16V_5A()
+        try:
+            self.set_calibration_16V_5A()
+        except Exception:
+            # Calibration can fail after SMBus has already opened its fd.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
+
+    def close(self):
+        bus, self.bus = self.bus, None
+        if bus is not None:
+            bus.close()
 
     def read(self,address):
         data = self.bus.read_i2c_block_data(self.addr, address, 2)
@@ -188,6 +201,58 @@ class INA219:
             value -= 65535
         return value * self._power_lsb
         
+class INA219Monitor:
+    """Reconnect an optional sensor without blocking the monitoring loop."""
+    def __init__(self, i2c_bus=1, addr=0x40, retry_interval=5.0,
+                 factory=INA219, clock=time.monotonic, logger=print):
+        self.i2c_bus = i2c_bus
+        self.addr = addr
+        self.retry_interval = retry_interval
+        self.factory = factory
+        self.clock = clock
+        self.logger = logger
+        self.sensor = None
+        self.next_retry = 0.0
+        self.closed = False
+
+    def _disconnect(self):
+        sensor, self.sensor = self.sensor, None
+        if sensor is not None:
+            try:
+                sensor.close()
+            except Exception as error:
+                self.logger(f"INA219 close error: {error}")
+
+    def read(self):
+        if self.closed:
+            return None
+        if self.sensor is None:
+            if self.clock() < self.next_retry:
+                return None
+            try:
+                self.sensor = self.factory(i2c_bus=self.i2c_bus, addr=self.addr)
+            except Exception as error:
+                self.next_retry = self.clock() + self.retry_interval
+                self.logger(f"INA219 initialization failed: {error}; retry in {self.retry_interval:g}s")
+                return None
+            self.logger("INA219 initialized successfully")
+        try:
+            # Publish only complete samples; never mix a partial read with zeros.
+            voltage = self.sensor.getBusVoltage_V()
+            current = self.sensor.getCurrent_mA() / 1000.0
+            power = self.sensor.getPower_W()
+            return voltage, current, power
+        except Exception as error:
+            self.logger(f"INA219 read error: {error}; retry in {self.retry_interval:g}s")
+            self._disconnect()
+            self.next_retry = self.clock() + self.retry_interval
+            return None
+
+    def close(self):
+        self.closed = True
+        self._disconnect()
+
+
 if __name__=='__main__':
 
     # Create an INA219 instance.

@@ -87,10 +87,10 @@ First run `sudo ./install.sh configure-fans` and reboot to enable the fan pins.
 1. **Install dependencies:**
    ```bash
    sudo apt update
-   sudo apt install python3 python3-pip python3-venv python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7 python3-smbus i2c-tools fonts-dejavu-core smartmontools
+   sudo apt install python3 python3-pip python3-venv python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7 i2c-tools fonts-dejavu-core smartmontools
    sudo mkdir -p /opt/rpi_support
-   sudo python3 -m venv --system-site-packages /opt/rpi_support/.venv
-   sudo /opt/rpi_support/.venv/bin/python -m pip install --ignore-installed psutil luma.oled Pillow
+   sudo python3 -m venv /opt/rpi_support/.venv
+   sudo /opt/rpi_support/.venv/bin/python -m pip install psutil luma.oled Pillow smbus2
    ```
 
 2. **Copy files:**
@@ -202,6 +202,16 @@ after reboot, preserving an existing application during this preparation step.
 The overlay assigns GPIO13/18/19 to this service; do not assign other peripherals
 to those same pins. The boot overlay is retained during application uninstall.
 
+### INA219 reconnection
+
+INA219 is optional. The first statistics poll tries I2C bus 1 at address `0x40`.
+If initialization or any measurement fails, the monitor closes the previous bus
+connection and retries initialization after 5 seconds, without a blocking sleep.
+Only complete voltage/current/power samples are published. While disconnected,
+INA219 contributes no power to the total and its detail is omitted from the log.
+Reconnection attempts and successful initialization appear in the journal.
+The bus is also closed when the monitoring process exits normally.
+
 ## 📁 File Structure
 
 ```
@@ -282,6 +292,7 @@ sudo chmod +x /opt/rpi_support/rpi_support.py
 - `libfreetype6-dev`, `libjpeg-dev`, `libopenjp2-7`, `libtiff5` - Image processing libraries
 
 ### Python Packages
+- `smbus2` - I2C/SMBus access for INA219 inside the isolated virtualenv
 - `psutil` - System and process monitoring
 - `luma.oled` - OLED display driver
 - `pillow` - Image processing and fonts

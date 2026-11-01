@@ -27,11 +27,20 @@ python3() {
     if [ "$FAILURE" = term-prepare ]; then kill -TERM "$BASHPID"; fi
     [ "$FAILURE" != venv ] || return 1
     if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
+        for argument in "$@"; do
+            if [ "$argument" = --system-site-packages ]; then
+                echo 'FAIL: distro packages must not leak into the release venv' >&2
+                return 1
+            fi
+        done
         local venv="${@: -1}"
         mkdir -p "$venv/bin"
         cat > "$venv/bin/python" <<'PYTHON'
 #!/bin/bash
 echo "venv-python $*" >> "$CASE/events"
+if [ "${3:-}" = install ]; then
+    case " $* " in *' smbus2 '*) ;; *) echo 'FAIL: isolated INA219 backend is missing' >&2; exit 1 ;; esac
+fi
 if [ "$FAILURE" = pip ] && [ "${3:-}" = install ]; then exit 1; fi
 exit 0
 PYTHON

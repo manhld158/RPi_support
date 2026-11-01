@@ -275,8 +275,8 @@ install_dependencies() {
     # Install system dependencies for the Python packages
     apt-get install -y python3-dev build-essential libfreetype6-dev libjpeg-dev libopenjp2-7
     
-    # Install I2C tools and SMBus library for INA219 sensor
-    apt-get install -y i2c-tools python3-smbus smartmontools
+    # SMBus Python support is installed inside the application's isolated venv.
+    apt-get install -y i2c-tools smartmontools
     
     # Install DejaVu fonts (required by the application)
     apt-get install -y fonts-dejavu-core
@@ -304,11 +304,12 @@ install_files() {
     chmod 755 "$NEW_RELEASE"
 
     # Keep the venv at its permanent path; moving a venv breaks script shebangs.
-    # System packages supply apt's smbus; pip packages live in this release.
-    python3 -m venv --system-site-packages "$NEW_RELEASE/.venv"
-    "$NEW_RELEASE/.venv/bin/python" -m pip install --ignore-installed psutil luma.oled Pillow
+    # Do not inherit distro Python packages: their metadata can fail pip check
+    # (for example apt-listchanges/ debconf on Debian/OpenMediaVault).
+    python3 -m venv "$NEW_RELEASE/.venv"
+    "$NEW_RELEASE/.venv/bin/python" -m pip install psutil luma.oled Pillow smbus2
     "$NEW_RELEASE/.venv/bin/python" -m pip check
-    "$NEW_RELEASE/.venv/bin/python" -c 'import psutil, smbus; from luma.oled.device import ssd1306; from PIL import Image, ImageDraw, ImageFont'
+    "$NEW_RELEASE/.venv/bin/python" -c 'import psutil, smbus2; from luma.oled.device import ssd1306; from PIL import Image, ImageDraw, ImageFont'
     "$NEW_RELEASE/.venv/bin/python" -m py_compile "$NEW_RELEASE/${SERVICE_NAME}.py" "$NEW_RELEASE/assets/INA219.py" "$NEW_RELEASE/assets/fan_control.py"
     
     print_status "Application files installed successfully."

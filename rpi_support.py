@@ -13,7 +13,7 @@ from luma.core.error import DeviceNotFoundError
 from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass, field
-from assets.INA219 import INA219
+from assets.INA219 import INA219Monitor
 from assets.fan_control import FanService
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,13 +66,9 @@ font10 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", f
 running = True
 fan_service = None
 
-# Initialize INA219
-ina219_sensor = None
-try:
-    ina219_sensor = INA219(i2c_bus=1, addr=0x40)
-    print("INA219 initialized successfully")
-except Exception as e:
-    print(f"INA219 initialization failed: {e}")
+# The first stats poll opens the bus; failed sensors retry without sleeping.
+ina219_monitor = INA219Monitor(i2c_bus=1, addr=0x40, retry_interval=5.0)
+atexit.register(ina219_monitor.close)
 
 def init_display(width = OLED_W, height = OLED_H):
     try:
@@ -156,16 +152,12 @@ def get_system_stat():
         tempData.power_total_w = sum(tempData.power_rails_w.values())
     
     #INA219 POWER MEASUREMENT
-    global ina219_sensor
-    if ina219_sensor:
-        try:
-            tempData.ina219_voltage_v = ina219_sensor.getBusVoltage_V()
-            tempData.ina219_current_a = ina219_sensor.getCurrent_mA() / 1000.0
-            tempData.ina219_power_w = ina219_sensor.getPower_W()
-            # Add INA219 power to total power
-            tempData.power_total_w += tempData.ina219_power_w
-        except Exception as e:
-            print(f"INA219 read error: {e}")
+    ina219_sample = ina219_monitor.read()
+    if ina219_sample is not None:
+        (tempData.ina219_voltage_v,
+         tempData.ina219_current_a,
+         tempData.ina219_power_w) = ina219_sample
+        tempData.power_total_w += tempData.ina219_power_w
 
     #ALARM
     raw_result = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True)

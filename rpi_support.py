@@ -14,7 +14,7 @@ from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass, field
 from assets.INA219 import INA219Monitor
-from assets.fan_control import FanService
+from assets.fan_control import FanService, format_fan_status
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, "assets", "png")
@@ -269,7 +269,7 @@ def log_stat_monitor(stats: SystemStats):
     lines.append("POWER: Total: {:.1f}W".format(stats.power_total_w))
     fan_state = fan_service.snapshot() if fan_service is not None else None
     if fan_state is not None:
-        lines.append("FANS: MAIN:{main}% DISK:{disk}% CONVECTION:{convection}% HDD:{disk_max_c}C".format(**fan_state))
+        lines.append(format_fan_status(fan_state))
     
     for rail, power in stats.power_rails_w.items():
         lines.append("  {}: {:.2f}W".format(rail, power))
@@ -303,7 +303,7 @@ def log_stat_monitor(stats: SystemStats):
         if stats.ina219_voltage_v > 0:
             summary += f" | INA219:{stats.ina219_voltage_v:.2f}V {stats.ina219_current_a:.3f}A"
         if fan_state is not None:
-            summary += " | FANS:{main}/{disk}/{convection}% HDD:{disk_max_c}C".format(**fan_state)
+            summary += " | " + format_fan_status(fan_state)
         print(summary)
 
 #Main code

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -8,7 +9,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from assets.fan_control import (CPU_CURVE, DISK_CURVE, FAN_CHANNELS, FanService,
-                                HardwarePWM, TemperatureCurve, find_pwm_chip,
+                                HardwarePWM, TemperatureCurve, DiskTemperaturePolicy,
+                                format_fan_status, find_pwm_chip,
                                 read_disk_temperatures, smart_temperature)
 
 
@@ -107,12 +109,12 @@ class DiskTests(FixtureTests):
         values, missing = read_disk_temperatures(self.root, run)
         self.assertEqual(set(calls), {"/dev/sda", "/dev/sdb", "/dev/sdaa"})
         self.assertEqual(max(values.values()), 43)
-        self.assertEqual(missing, [])
+        self.assertEqual(missing, {})
 
     def test_health_warning_does_not_discard_valid_temperature(self):
         (self.root / "sda").mkdir()
         run = lambda *a, **kw: SimpleNamespace(returncode=8, stdout='{"temperature":{"current":44}}')
-        self.assertEqual(read_disk_temperatures(self.root, run), ({"/dev/sda": 44}, []))
+        self.assertEqual(read_disk_temperatures(self.root, run), ({"/dev/sda": 44}, {}))
 
     def test_missing_or_failed_smart_is_reported(self):
         (self.root / "sda").mkdir()
@@ -121,11 +123,23 @@ class DiskTests(FixtureTests):
                        SimpleNamespace(returncode=0, stdout="invalid")]:
             values, missing = read_disk_temperatures(self.root, lambda *a, **kw: result)
             self.assertEqual(values, {})
-            self.assertEqual(missing, ["/dev/sda"])
+            self.assertEqual(set(missing), {"/dev/sda"})
+            self.assertTrue(missing["/dev/sda"])
 
     def test_temperature_attribute_low_byte(self):
         data = {"ata_smart_attributes": {"table": [{"id": 194, "raw": {"value": (50 << 16) | 37}}]}}
         self.assertEqual(smart_temperature(data), 37)
+
+    def test_timeout_names_the_failed_drive_and_reason(self):
+        (self.root / "sda").mkdir()
+
+        def timeout(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, 3)
+
+        values, missing = read_disk_temperatures(self.root, timeout)
+        self.assertEqual(values, {})
+        self.assertIn("TimeoutExpired", missing["/dev/sda"])
+        self.assertIn("3 seconds", missing["/dev/sda"])
 
 
 class FakePWM:
@@ -168,10 +182,34 @@ class ControlTests(FixtureTests):
         self.assertEqual(self.pwm.values["main"], 100)
         self.assertEqual(self.pwm.values["convection"], 100)
 
-    def test_any_missing_disk_sensor_is_full_speed(self):
+    def test_one_unknown_disk_with_another_readable_disk_uses_seventy_percent(self):
         self.service.disk_sample = (100, {"/dev/sda": 30}, ["/dev/sdb"])
         self.service.step(100)
+        self.assertEqual(self.pwm.values["disk"], 70)
+        self.assertEqual(self.pwm.values["convection"], 70)
+        self.assertEqual(self.service.snapshot()["disk_max_c"], 30)
+
+    def test_hot_readable_disk_overrides_seventy_percent_minimum(self):
+        self.service.disk_sample = (100, {"/dev/sda": 51}, ["/dev/sdb"])
+        self.service.step(100)
         self.assertEqual(self.pwm.values["disk"], 100)
+
+    def test_cached_hot_disk_does_not_cause_a_spike_to_full_speed(self):
+        self.service.step(100)
+        self.service.disk_sample = (130, {"/dev/sdb": 35}, {"/dev/sda": "timeout"})
+        self.service.step(130)
+        self.assertEqual(self.pwm.values["disk"], 70)
+        self.assertEqual(self.service.snapshot()["disk_max_c"], 43)
+        self.assertEqual(self.service.snapshot()["disk_cached"], {"/dev/sda": 30})
+
+    def test_recovery_from_unknown_disk_reduces_speed_after_delay(self):
+        self.service.disk_sample = (100, {"/dev/sda": 30}, {"/dev/sdb": "timeout"})
+        self.service.step(100)
+        self.service.disk_sample = (130, {"/dev/sda": 30, "/dev/sdb": 31}, {})
+        self.service.step(130)
+        self.assertEqual(self.pwm.values["disk"], 70)
+        self.service.step(140)
+        self.assertEqual(self.pwm.values["disk"], 40)
 
     def test_stale_disk_readings_are_full_speed(self):
         self.service.step(161)
@@ -194,6 +232,97 @@ class ControlTests(FixtureTests):
         self.assertFalse(self.service.healthy)
         self.assertEqual(self.pwm.fallbacks, 1)
         self.assertEqual(self.pwm.values, {name: 100 for name in FAN_CHANNELS})
+
+    def test_smart_worker_logs_failed_drive_and_recovery(self):
+        scans = iter([({}, {"/dev/sda": "SMART timeout"}), ({"/dev/sda": 38}, {})])
+        self.service.disk_reader = lambda _: next(scans)
+        waits = []
+
+        def wait(_):
+            waits.append(True)
+            if len(waits) == 2:
+                self.service.stop_event.set()
+
+        with patch.object(self.service.stop_event, "wait", side_effect=wait):
+            with patch("builtins.print") as output:
+                self.service._disk_loop()
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertIn("Disk SMART read error: /dev/sda: SMART timeout", messages)
+        self.assertIn("Disk SMART reading restored: /dev/sda", messages)
+
+
+class DiskPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = DiskTemperaturePolicy()
+
+    def test_all_readable_uses_hottest_disk(self):
+        state = self.policy.evaluate((100, {"/dev/sda": 35, "/dev/sdb": 44}, {}), 100)
+        self.assertEqual(state["disk_max_c"], 44)
+        self.assertEqual(state["disk_status"], "ok")
+
+    def test_temporary_failure_uses_cache_without_losing_hottest_disk(self):
+        self.policy.evaluate((100, {"/dev/sda": 35, "/dev/sdb": 44}, {}), 100)
+        state = self.policy.evaluate((130, {"/dev/sda": 36}, {"/dev/sdb": "timeout"}), 130)
+        self.assertEqual(state["disk_max_c"], 44)
+        self.assertEqual(state["disk_status"], "cached")
+        self.assertEqual(state["disk_cached"], {"/dev/sdb": 30})
+        self.assertEqual(state["disk_minimum_pwm"], 0)
+
+    def test_cache_expires_after_120_seconds_not_after_each_failure(self):
+        self.policy.evaluate((100, {"/dev/sda": 35, "/dev/sdb": 44}, {}), 100)
+        self.policy.evaluate((160, {"/dev/sda": 35}, {"/dev/sdb": "timeout"}), 160)
+        sample = (220, {"/dev/sda": 35}, {"/dev/sdb": "timeout"})
+        at_limit = self.policy.evaluate(sample, 220)
+        self.assertEqual(at_limit["disk_cached"], {"/dev/sdb": 120})
+        expired = self.policy.evaluate(sample, 220.1)
+        self.assertEqual(expired["disk_cached"], {})
+        self.assertEqual(expired["disk_max_c"], 35)
+        self.assertEqual(expired["disk_missing"], {"/dev/sdb": "timeout"})
+        self.assertEqual(expired["disk_minimum_pwm"], 70)
+
+    def test_repeated_control_ticks_do_not_refresh_cache(self):
+        sample = (100, {"/dev/sda": 35}, {})
+        self.policy.evaluate(sample, 100)
+        for now in range(101, 220):
+            self.policy.evaluate(sample, now)
+        state = self.policy.evaluate((221, {"/dev/sdb": 36}, {"/dev/sda": "timeout"}), 221)
+        self.assertEqual(state["disk_minimum_pwm"], 70)
+        self.assertEqual(set(state["disk_missing"]), {"/dev/sda"})
+
+    def test_all_current_reads_failed_is_full_speed_even_with_cache(self):
+        self.policy.evaluate((100, {"/dev/sda": 35}, {}), 100)
+        state = self.policy.evaluate((130, {}, {"/dev/sda": "timeout"}), 130)
+        self.assertEqual(state["disk_minimum_pwm"], 100)
+        self.assertEqual(state["disk_cached"], {"/dev/sda": 30})
+
+    def test_disconnected_drive_is_removed_from_cache(self):
+        self.policy.evaluate((100, {"/dev/sda": 35, "/dev/sdb": 55}, {}), 100)
+        state = self.policy.evaluate((130, {"/dev/sda": 35}, {}), 130)
+        self.assertEqual(state["disk_max_c"], 35)
+        self.assertNotIn("/dev/sdb", self.policy.cache)
+
+    def test_no_drives_uses_minimum_but_stale_empty_scan_is_not_trusted(self):
+        sample = (100, {}, {})
+        self.assertEqual(self.policy.evaluate(sample, 100)["disk_minimum_pwm"], 30)
+        self.assertEqual(self.policy.evaluate(sample, 161)["disk_minimum_pwm"], 100)
+
+    def test_scanner_error_uses_full_speed_and_does_not_refresh_cache(self):
+        self.policy.evaluate((100, {"/dev/sda": 35}, {}), 100)
+        state = self.policy.evaluate(None, 130)
+        self.assertEqual(state["disk_minimum_pwm"], 100)
+        self.assertEqual(state["disk_cached"], {"/dev/sda": 30})
+
+    def test_logs_distinguish_cache_and_unknown_disks(self):
+        state = {"main": 55, "disk": 70, "convection": 70,
+                 "disk_max_c": 43, "disk_status": "degraded",
+                 "disk_cached": {"/dev/sdb": 65}, "disk_missing": {"/dev/sdc": "timeout"}}
+        text = format_fan_status(state)
+        self.assertIn("HDD:43.0C[degraded]", text)
+        self.assertIn("cached:sdb(65s)", text)
+        self.assertIn("missing:sdc", text)
+        state["disk_max_c"] = None
+        self.assertIn("HDD:N/A", format_fan_status(state))
+        self.assertNotIn("NoneC", format_fan_status(state))
 
 
 if __name__ == "__main__":

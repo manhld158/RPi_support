@@ -12,6 +12,8 @@ import time
 CPU_CURVE = ((-math.inf, 30), (40, 40), (50, 55), (60, 70), (70, 85), (75, 100))
 DISK_CURVE = ((-math.inf, 30), (30, 40), (35, 55), (40, 70), (45, 85), (50, 100))
 FAN_CHANNELS = {"main": 1, "convection": 2, "disk": 3}
+DISK_SCAN_MAX_AGE = 60
+DISK_CACHE_MAX_AGE = 120
 
 
 class TemperatureCurve:
@@ -125,7 +127,7 @@ def smart_temperature(data):
 
 def read_disk_temperatures(block_root=Path("/sys/block"), runner=subprocess.run):
     temperatures = {}
-    missing = []
+    missing = {}
     for disk in sorted(Path(block_root).iterdir()):
         if not re.fullmatch(r"sd[a-z]+", disk.name):
             continue
@@ -134,14 +136,74 @@ def read_disk_temperatures(block_root=Path("/sys/block"), runner=subprocess.run)
             result = runner(["smartctl", "-j", "-A", device], capture_output=True, text=True, timeout=3)
             # Higher status bits report disk-health findings, not invalid JSON.
             if result.returncode < 0 or result.returncode & 0x07:
-                raise ValueError("SMART command failed")
+                raise ValueError(f"smartctl exit status {result.returncode}")
             temperature = smart_temperature(json.loads(result.stdout))
             if temperature is None:
                 raise ValueError("Temperature unavailable")
             temperatures[device] = temperature
-        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError):
-            missing.append(device)
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError) as error:
+            missing[device] = f"{type(error).__name__}: {error}"
     return temperatures, missing
+
+
+class DiskTemperaturePolicy:
+    """Keep each attached drive's last good reading without refreshing its age."""
+    def __init__(self):
+        self.cache = {}
+        self.devices = set()
+        self.last_sample = None
+        self.errors = {}
+
+    def evaluate(self, sample, now):
+        fresh_scan = sample is not None and 0 <= now - sample[0] <= DISK_SCAN_MAX_AGE
+        temperatures = sample[1] if sample is not None else {}
+        if sample is not None and sample is not self.last_sample:
+            scanned_at, temperatures, errors = sample
+            self.devices = set(temperatures) | set(errors)
+            self.errors = dict(errors) if isinstance(errors, dict) else dict.fromkeys(errors, "temperature unavailable")
+            self.cache = {device: value for device, value in self.cache.items() if device in self.devices}
+            for device, temperature in temperatures.items():
+                self.cache[device] = (temperature, scanned_at)
+            self.last_sample = sample
+
+        usable, cached, unknown = {}, {}, {}
+        fresh_count = 0
+        for device in sorted(self.devices):
+            previous = self.cache.get(device)
+            if previous is not None and 0 <= now - previous[1] <= DISK_CACHE_MAX_AGE:
+                usable[device] = previous[0]
+                if fresh_scan and device in temperatures:
+                    fresh_count += 1
+                else:
+                    cached[device] = int(now - previous[1])
+            else:
+                unknown[device] = self.errors.get(device, "no recent temperature")
+
+        maximum = max(usable.values()) if usable else None
+        if not self.devices and fresh_scan:
+            status, minimum = "no-drives", 30
+        elif not fresh_count:
+            status, minimum = ("waiting" if self.last_sample is None else "unavailable"), 100
+        elif unknown:
+            status, minimum = "degraded", 70
+        elif cached:
+            status, minimum = "cached", 0
+        else:
+            status, minimum = "ok", 0
+        return {"disk_max_c": maximum, "disk_status": status,
+                "disk_cached": cached, "disk_missing": unknown, "disk_minimum_pwm": minimum}
+
+
+def format_fan_status(state):
+    temperature = state["disk_max_c"]
+    value = "N/A" if temperature is None else f"{temperature:.1f}C"
+    text = (f"FANS:{state['main']}/{state['disk']}/{state['convection']}% "
+            f"HDD:{value}[{state['disk_status']}]")
+    if state["disk_cached"]:
+        text += " cached:" + ",".join(f"{Path(device).name}({age}s)" for device, age in state["disk_cached"].items())
+    if state["disk_missing"]:
+        text += " missing:" + ",".join(Path(device).name for device in state["disk_missing"])
+    return text
 
 
 class FanService:
@@ -155,7 +217,9 @@ class FanService:
         self.stop_event = threading.Event()
         self.guard = threading.Lock()
         self.disk_sample = None
-        self.state = {"main": 100, "disk": 100, "convection": 100, "disk_max_c": None}
+        self.disk_policy = DiskTemperaturePolicy()
+        self.state = {"main": 100, "disk": 100, "convection": 100,
+                      **self.disk_policy.evaluate(None, 0)}
         self.healthy = False
         self.started_at = time.monotonic()
         self.lock_file = None
@@ -187,10 +251,21 @@ class FanService:
         self.disk_thread.start()
 
     def _disk_loop(self):
+        previous_errors = {}
         while not self.stop_event.is_set():
             try:
+                # Use scan start as a conservative timestamp for every reading.
+                # Slow scans must not make their earliest readings look newer.
+                scanned_at = time.monotonic()
                 temperatures, missing = self.disk_reader(self.block_root)
-                sample = (time.monotonic(), temperatures, missing)
+                errors = dict(missing) if isinstance(missing, dict) else dict.fromkeys(missing, "temperature unavailable")
+                for device, reason in errors.items():
+                    if previous_errors.get(device) != reason:
+                        print(f"Disk SMART read error: {device}: {reason}", flush=True)
+                for device in previous_errors.keys() & temperatures.keys():
+                    print(f"Disk SMART reading restored: {device}", flush=True)
+                previous_errors = errors
+                sample = (scanned_at, temperatures, errors)
             except Exception as error:
                 print(f"Disk temperature error: {error}", flush=True)
                 sample = None
@@ -207,20 +282,24 @@ class FanService:
             cpu = None
         with self.guard:
             sample = self.disk_sample
-        disk_max = None
-        if sample is None or now - sample[0] > 60 or sample[2]:
-            disk_duty = self.curves["disk"].update(None, now)
-        elif sample[1]:
-            disk_max = max(sample[1].values())
-            disk_duty = self.curves["disk"].update(disk_max, now)
+        disk_state = self.disk_policy.evaluate(sample, now)
+        minimum = disk_state["disk_minimum_pwm"]
+        disk_temperature = disk_state["disk_max_c"]
+        if minimum == 100:
+            disk_temperature = None
         else:
-            # No sdX drives are attached; keep the disk fan at minimum.
-            disk_duty = self.curves["disk"].update(1, now)
+            disk_temperature = disk_temperature if disk_temperature is not None else 1
+            if minimum:
+                # Apply the minimum through the curve so recovery still uses
+                # the same hysteresis and delayed speed reduction.
+                floor_temperature = next(threshold for threshold, pwm in DISK_CURVE if pwm >= minimum)
+                disk_temperature = max(disk_temperature, floor_temperature)
+        disk_duty = self.curves["disk"].update(disk_temperature, now)
         main_duty = self.curves["main"].update(cpu, now)
         if now - self.started_at < 2:
             main_duty = disk_duty = 100  # Startup kick for two-wire fans.
         state = {"main": main_duty, "disk": disk_duty,
-                 "convection": max(main_duty, disk_duty), "disk_max_c": disk_max}
+                 "convection": max(main_duty, disk_duty), **disk_state}
         for name in FAN_CHANNELS:
             self.pwm.set(name, state[name])
         with self.guard:

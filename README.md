@@ -178,10 +178,29 @@ temperature to remain at least 2°C below the current level's lower threshold fo
 
 The control thread reads CPU temperature every second. A separate worker reads
 SMART temperatures every 30 seconds with a 3-second timeout per disk. Partitions,
-NVMe and SD-card devices are excluded. If any selected drive cannot report a
-temperature, or a scan becomes older than 60 seconds, the disk fan goes to 100%.
-Missing CPU readings make the main fan run at 100%. With no `sdX` drives attached,
-the disk fan uses the minimum 30%. Convection always follows the higher duty.
+NVMe and SD-card devices are excluded. After a transient SMART failure, each drive
+can reuse its last good temperature until that reading is 120 seconds old. Cached values
+participate in the maximum temperature, and failed reads never refresh their age.
+If a drive has no reading or its cache expires, the disk fan uses a minimum of
+70%, while still following hotter readable/cached drives. If no attached drive
+has a successful reading from a scan within the last 60 seconds, the disk fan
+uses 100%, even if cached values remain. Missing CPU readings make the main fan
+run at 100%. With a fresh scan confirming no `sdX` drives, the disk fan uses the
+minimum 30%. Removed drives are dropped from the cache. Speed reductions retain
+the hysteresis and delay above. Convection always follows the higher duty.
+
+Logs distinguish `ok`, `cached`, `degraded`, `unavailable`, `waiting` and
+`no-drives` disk states. For example:
+
+```text
+FANS:55/70/70% HDD:43.0C[cached] cached:sdb(65s)
+FANS:55/70/70% HDD:35.0C[degraded] missing:sdb
+FANS:55/100/100% HDD:N/A[unavailable] missing:sda,sdb
+```
+
+`cached` includes the age of the saved reading; `missing` identifies drives
+without a usable reading. SMART errors include the device and reason in separate
+journal messages, with another message when a failed drive reports again.
 
 The default PWM frequency is 25 kHz. To change it, set the following in
 `/etc/default/rpi_support`, then restart the service:

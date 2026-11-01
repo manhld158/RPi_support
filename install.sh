@@ -18,6 +18,7 @@ RELEASES_DIR="/opt/${SERVICE_NAME}-releases"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LOCK_FILE="/run/lock/${SERVICE_NAME}.install.lock"
 HEALTH_FILE="/run/${SERVICE_NAME}/health"
+FAN_CLI="/usr/local/bin/rpi-fan"
 FAN_OVERLAY_MARKER="/proc/device-tree/rpi-support-fans"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -302,6 +303,7 @@ install_files() {
     chown -R root:root "$NEW_RELEASE"
     chmod -R u=rwX,go=rX "$NEW_RELEASE"
     chmod 755 "$NEW_RELEASE"
+    chmod 755 "$NEW_RELEASE/assets/rpi-fan"
 
     # Keep the venv at its permanent path; moving a venv breaks script shebangs.
     # Do not inherit distro Python packages: their metadata can fail pip check
@@ -399,6 +401,9 @@ remove_release() {
 
 rollback_install() {
     print_warning "Restoring the previous installation..."
+    if [ "${FAN_CLI_CREATED:-false}" = true ] && [ -L "$FAN_CLI" ] && [ "$(readlink "$FAN_CLI")" = "$INSTALL_DIR/assets/rpi-fan" ]; then
+        rm -- "$FAN_CLI" || return 1
+    fi
     # Do not change files under a service that could not be stopped.
     if [ "$SERVICE_EXISTED" = true ] || [ "$SERVICE_CHANGED" = true ]; then
         systemctl stop "$SERVICE_NAME" || return 1
@@ -494,6 +499,9 @@ remove_installation() {
     systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
     
     # Remove installation directory
+    if [ -L "$FAN_CLI" ] && [ "$(readlink "$FAN_CLI")" = "$INSTALL_DIR/assets/rpi-fan" ]; then
+        rm -- "$FAN_CLI"
+    fi
     if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
         rm -rf "$INSTALL_DIR"
         print_status "Installation directory removed."
@@ -576,7 +584,7 @@ main_install() {
 
     # Reject incomplete sources before installing packages or stopping anything.
     local source_file
-    for source_file in "${SERVICE_NAME}.py" "${SERVICE_NAME}.service" assets/INA219.py assets/fan_control.py assets/rpi-support-fans-overlay.dts; do
+    for source_file in "${SERVICE_NAME}.py" "${SERVICE_NAME}.service" assets/INA219.py assets/fan_control.py assets/rpi-fan assets/rpi-support-fans-overlay.dts; do
         if [ ! -f "$SCRIPT_DIR/$source_file" ]; then
             print_error "Missing source file: $SCRIPT_DIR/$source_file"
             return 1
@@ -590,6 +598,12 @@ main_install() {
     # Serialize installers so a second update cannot overwrite recovery state.
     acquire_operation_lock || return 1
     check_fan_hardware || return 1
+    if [ -e "$FAN_CLI" ] || [ -L "$FAN_CLI" ]; then
+        if [ ! -L "$FAN_CLI" ] || [ "$(readlink "$FAN_CLI")" != "$INSTALL_DIR/assets/rpi-fan" ]; then
+            print_error "$FAN_CLI already exists and is not managed by this installer."
+            return 1
+        fi
+    fi
     
     # Check if already installed
     if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ] || [ -f "$SERVICE_FILE" ]; then
@@ -610,6 +624,7 @@ main_install() {
     PREVIOUS_RELEASE=""
     TRANSACTION_DIR=""
     APPLICATION_SAVED=false
+    FAN_CLI_CREATED=false
     SERVICE_CHANGED=false
     SERVICE_EXISTED=false
     SWITCH_STARTED=false
@@ -646,6 +661,11 @@ main_install() {
     fi
     ln -s "$NEW_RELEASE" "$INSTALL_DIR"
     install_service
+    if [ ! -L "$FAN_CLI" ]; then
+        mkdir -p "$(dirname "$FAN_CLI")"
+        FAN_CLI_CREATED=true
+        ln -s "$INSTALL_DIR/assets/rpi-fan" "$FAN_CLI"
+    fi
     start_service
     INSTALL_COMMITTED=true
     
@@ -660,6 +680,7 @@ main_install() {
     print_warning "You can reboot now with: sudo reboot"
     print_status ""
     print_status "Useful commands:"
+    print_status "  Fan override (5 minutes): sudo rpi-fan set main 60 disk 70 convection 80"
     print_status "  Check status: sudo systemctl status $SERVICE_NAME"
     print_status "  View logs: sudo journalctl -u $SERVICE_NAME -f"
     print_status "  Restart: sudo systemctl restart $SERVICE_NAME"

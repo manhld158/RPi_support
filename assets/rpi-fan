@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/rpi_support/.venv/bin/python /opt/rpi_support/assets/fan_control.py "$@"

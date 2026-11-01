@@ -92,6 +92,7 @@ run_case() {
     RELEASES_DIR="$CASE/releases"
     SERVICE_FILE="$CASE/app.service"
     HEALTH_FILE="$CASE/health"
+    FAN_CLI="$CASE/bin/rpi-fan"
     printf '12345 %s\n' "$(date +%s)" > "$HEALTH_FILE"
     if [ "$failure" = no-stats ]; then rm "$HEALTH_FILE"; fi
     if [ "$failure" = stale-stats ]; then echo '12345 1' > "$HEALTH_FILE"; fi
@@ -145,6 +146,8 @@ run_case() {
         test "$result" = 0
         test -L "$INSTALL_DIR"
         test -x "$INSTALL_DIR/.venv/bin/python"
+        test -x "$FAN_CLI"
+        test "$(readlink "$FAN_CLI")" = "$INSTALL_DIR/assets/rpi-fan"
         test "$(cat "$CASE/active")" = true
         test "$(cat "$CASE/enabled")" = true
         test ! -e "$RELEASES_DIR/release.old"
@@ -152,6 +155,7 @@ run_case() {
         awk '/systemctl stop/ { stopped=1 } /^(apt|python|venv-python)/ { if (stopped) exit 1 }' "$CASE/events"
     else
         test "$result" != 0
+        test ! -L "$FAN_CLI"
         test "$(cat "$CASE/active")" = "$active"
         test "$(cat "$CASE/enabled")" = "$enabled"
         if [ "$existing" = none ]; then
@@ -194,4 +198,5 @@ remove_installation > "$CASE/removal-output"
 test ! -e "$INSTALL_DIR" && test ! -L "$INSTALL_DIR"
 test ! -e "$SERVICE_FILE"
 test ! -e "$RELEASES_DIR"
+test ! -L "$FAN_CLI"
 echo 'PASS: removal includes release virtualenvs'

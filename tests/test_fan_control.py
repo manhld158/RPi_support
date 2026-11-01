@@ -171,6 +171,105 @@ class ControlTests(FixtureTests):
         self.assertEqual(self.pwm.values, {"main": 55, "disk": 70, "convection": 70})
         self.assertEqual(self.service.snapshot()["disk_max_c"], 43)
 
+    def test_override_expires_at_five_minutes_without_client(self):
+        self.service.command({"action": "set", "fan": "all", "percent": 60}, 100)
+        self.service.step(100)
+        self.assertEqual(self.pwm.values, dict.fromkeys(FAN_CHANNELS, 60))
+        self.service.disk_sample = (399, {"/dev/sda": 43}, {})
+        self.service.step(399)
+        self.assertEqual(self.pwm.values, dict.fromkeys(FAN_CHANNELS, 60))
+        self.service.step(400)
+        self.assertEqual(self.pwm.values, {"main": 55, "disk": 70, "convection": 70})
+        self.assertEqual(self.service.overrides, {})
+
+    def test_independent_overrides_and_early_cancel(self):
+        self.service.command({"action": "set", "fan": "main", "percent": 80}, 100)
+        self.service.step(100)
+        self.assertEqual(self.pwm.values, {"main": 80, "disk": 70, "convection": 80})
+        result = self.service.command({"action": "status"}, 110)
+        self.assertEqual(result["overrides"]["main"]["remaining_seconds"], 290)
+        self.service.command({"action": "auto", "fan": "main"}, 110)
+        self.service.step(110)
+        self.assertEqual(self.pwm.values["main"], 55)
+
+    def test_different_duties_share_deadline_and_expire_together(self):
+        duties = {"main": 60, "disk": 70, "convection": 80}
+        self.service.command({"action": "set", "duties": duties}, 100)
+        self.service.step(100)
+        self.assertEqual(self.pwm.values, duties)
+        self.assertEqual({deadline for _, deadline in self.service.overrides.values()}, {400})
+        self.service.disk_sample = (400, {"/dev/sda": 43}, {})
+        self.service.step(400)
+        self.assertEqual(self.pwm.values, {"main": 55, "disk": 70, "convection": 70})
+
+    def test_invalid_batch_is_rejected_without_partial_changes(self):
+        for duties in ({"main": 60, "disk": 101}, {"main": 60, "bad": 70}, {}, []):
+            with self.subTest(duties=duties), self.assertRaises(ValueError):
+                self.service.command({"action": "set", "duties": duties}, 100)
+            self.assertEqual(self.service.overrides, {})
+
+    def test_cli_sends_batch_in_one_request(self):
+        from unittest.mock import MagicMock
+        from assets.fan_control import main
+        client = MagicMock()
+        client.__enter__.return_value = client
+        response = client.makefile.return_value.__enter__.return_value
+        response.readline.return_value = '{"ok": true}'
+        with patch("assets.fan_control.socket.AF_UNIX", 1, create=True), \
+                patch("assets.fan_control.socket.socket", return_value=client), patch("builtins.print"):
+            main(["set", "main", "60", "disk", "70", "convection", "80"])
+        self.assertEqual(json.loads(client.sendall.call_args.args[0]),
+                         {"action": "set", "seconds": 300,
+                          "duties": {"main": 60, "disk": 70, "convection": 80}})
+
+    def test_new_command_replaces_deadline_and_auto_cancels_all(self):
+        self.service.command({"action": "set", "fan": "all", "percent": 60}, 100)
+        self.service.command({"action": "set", "fan": "main", "percent": 90, "seconds": 20}, 110)
+        self.service.step(130)
+        self.assertEqual(self.pwm.values, {"main": 55, "disk": 60, "convection": 60})
+        self.service.command({"action": "auto"}, 131)
+        self.service.step(131)
+        self.assertEqual(self.pwm.values, {"main": 55, "disk": 70, "convection": 70})
+
+    def test_automatic_curve_keeps_tracking_during_override(self):
+        self.service.command({"action": "set", "fan": "main", "percent": 60, "seconds": 10}, 100)
+        self.cpu.write_text("76000")
+        self.service.step(100)
+        self.assertEqual(self.pwm.values["main"], 60)
+        self.service.step(110)
+        self.assertEqual(self.pwm.values["main"], 100)
+
+    def test_invalid_commands_do_not_change_overrides(self):
+        for request in [[], {"action": "bogus"}, {"action": "set", "fan": "bad"},
+                        *({"action": "set", "percent": value} for value in (-1, 101, True, 1.5)),
+                        *({"action": "set", "percent": 60, "seconds": value}
+                          for value in (0, -1, 86401, True, float("nan")))]:
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                self.service.command(request, 100)
+        self.assertEqual(self.service.overrides, {})
+
+    def test_socket_command_and_malformed_request(self):
+        from unittest.mock import MagicMock
+        self.service.command_socket = MagicMock()
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        self.service.command_socket.accept.return_value = (connection, None)
+        connection.recv.return_value = b'{"action":"set","fan":"main","percent":80}\n'
+        with patch("assets.fan_control.time.monotonic", return_value=100):
+            self.service._poll_command()
+        response = json.loads(connection.sendall.call_args.args[0])
+        self.assertTrue(response["ok"])
+        self.assertEqual(self.service.overrides["main"], (80, 400))
+        connection.recv.return_value = b'bad json\n'
+        self.service._poll_command()
+        self.assertFalse(json.loads(connection.sendall.call_args.args[0])["ok"])
+
+    def test_startup_kick_takes_priority_over_override(self):
+        self.service.command({"action": "set", "percent": 0}, 100)
+        self.service.started_at = 99
+        self.service.step(100)
+        self.assertEqual(self.pwm.values, dict.fromkeys(FAN_CHANNELS, 100))
+
     def test_convection_tracks_faster_cpu_fan(self):
         self.cpu.write_text("76000")
         self.service.step(100)

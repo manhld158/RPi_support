@@ -202,6 +202,47 @@ FANS:55/100/100% HDD:N/A[unavailable] missing:sda,sdb
 without a usable reading. SMART errors include the device and reason in separate
 journal messages, with another message when a failed drive reports again.
 
+### Temporary fan override from the CLI
+
+While the service is running, use its CLI to override one fan or all fans:
+The installer provides `rpi-fan` in `/usr/local/bin`; rerun
+`sudo ./install.sh install` from the updated source to install it.
+
+```bash
+# Set all three fans to 60% for 5 minutes (default duration).
+sudo rpi-fan set all 60
+
+# Override only the CPU fan for 120 seconds.
+sudo rpi-fan set main 80 --seconds 120
+
+# Set different duties together, with one shared 5-minute deadline.
+sudo rpi-fan set main 60 disk 70 convection 80
+
+# Show last applied PWM and remaining override times.
+sudo rpi-fan status
+
+# Return all fans to automatic control immediately (or use: auto main).
+sudo rpi-fan auto
+```
+
+Fan names are `main`, `disk`, `convection`, and `all`. PWM accepts integers
+from 0 to 100; duration accepts 1 to 86400 seconds. A new command replaces the
+selected fans' previous overrides and deadlines. Multiple FAN PWM pairs are
+validated together and applied in the same control cycle with a shared deadline.
+Do not mix `all` with individual fans or repeat a fan. Changes apply within about one
+second. The CLI exits immediately; the service owns the monotonic expiry timer,
+so closing the terminal does not prevent automatic recovery. Restarting the
+service clears all overrides. No service stop is needed after installation.
+
+Manual PWM takes precedence over temperature curves and sensor fallback speeds
+for the selected fans, so choose a suitable value while watching temperatures.
+The initial two-second full-speed kick and PWM-error full-speed fallback remain
+active. An automatic convection fan follows the maximum of the actual main and
+disk duties; overriding convection sets its duty independently. Temperature
+curves continue updating during an override and resume at expiry. Commands use
+the root-only `/run/rpi_support/fan.sock` Unix socket. The `state` in a command
+response is the last applied sample; `overrides` shows the accepted settings.
+
 The default PWM frequency is 25 kHz. To change it, set the following in
 `/etc/default/rpi_support`, then restart the service:
 

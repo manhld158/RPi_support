@@ -39,6 +39,7 @@ journalctl() { echo 'mock service log'; }
 for SCENARIO in running auto-restarting loaded-without-file missing stop-error query-error empty-state; do
     CASE="$FIXTURES/$SCENARIO"
     INSTALL_DIR="$CASE/app"
+    FAN_CLI="$CASE/bin/rpi-fan"
     SERVICE_FILE="$CASE/app.service"
     RELEASES_DIR="$CASE/releases"
     mkdir -p "$INSTALL_DIR" "$RELEASES_DIR/release.test"

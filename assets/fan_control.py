@@ -1,10 +1,12 @@
 """Positive hardware PWM for three FET-driven fans on Raspberry Pi 5."""
 import json
+import argparse
 import math
 import os
 from pathlib import Path
 import re
 import subprocess
+import socket
 import threading
 import time
 
@@ -14,6 +16,7 @@ DISK_CURVE = ((-math.inf, 30), (30, 40), (35, 55), (40, 70), (45, 85), (50, 100)
 FAN_CHANNELS = {"main": 1, "convection": 2, "disk": 3}
 DISK_SCAN_MAX_AGE = 60
 DISK_CACHE_MAX_AGE = 120
+CONTROL_SOCKET = "/run/rpi_support/fan.sock"
 
 
 class TemperatureCurve:
@@ -223,6 +226,63 @@ class FanService:
         self.healthy = False
         self.started_at = time.monotonic()
         self.lock_file = None
+        self.command_socket = None
+        self.overrides = {}
+
+    def command(self, request, now):
+        """Commands run on the control thread; deadlines use the monotonic clock."""
+        if not isinstance(request, dict):
+            raise ValueError("Expected a JSON object")
+        action = request.get("action")
+        fan = request.get("fan", "all")
+        if fan not in (*FAN_CHANNELS, "all"):
+            raise ValueError("Unknown fan")
+        names = list(FAN_CHANNELS) if fan == "all" else [fan]
+        if action == "set":
+            duties = request.get("duties", dict.fromkeys(names, request.get("percent")))
+            duration = request.get("seconds", 300)
+            if not isinstance(duties, dict) or not duties or any(name not in FAN_CHANNELS for name in duties):
+                raise ValueError("Expected PWM values keyed by main, disk, or convection")
+            if any(type(percent) is not int or not 0 <= percent <= 100 for percent in duties.values()):
+                raise ValueError("PWM must be an integer from 0 to 100")
+            if type(duration) is not int or not 1 <= duration <= 86400:
+                raise ValueError("Duration must be 1 to 86400 seconds")
+            for name, percent in duties.items():
+                self.overrides[name] = (percent, now + duration)
+        elif action == "auto":
+            for name in names:
+                self.overrides.pop(name, None)
+        elif action != "status":
+            raise ValueError("Unknown action")
+        return {"ok": True, "state": self.snapshot(),
+                "overrides": {name: {"percent": duty, "remaining_seconds": math.ceil(deadline - now)}
+                              for name, (duty, deadline) in self.overrides.items() if deadline > now}}
+
+    def _poll_command(self):
+        if self.command_socket is None:
+            return
+        try:
+            connection, _ = self.command_socket.accept()
+        except BlockingIOError:
+            return
+        with connection:
+            connection.settimeout(0.2)
+            try:
+                data = b""
+                while b"\n" not in data and len(data) <= 4096:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                if len(data) > 4096 or b"\n" not in data:
+                    raise ValueError("Expected a JSON line of at most 4096 bytes")
+                result = self.command(json.loads(data.split(b"\n", 1)[0]), time.monotonic())
+            except (ValueError, TypeError, OSError) as error:
+                result = {"ok": False, "error": str(error)}
+            try:
+                connection.sendall((json.dumps(result) + "\n").encode())
+            except OSError:
+                pass
 
     @classmethod
     def from_environment(cls):
@@ -245,6 +305,18 @@ class FanService:
             raise
 
     def start(self):
+        self.command_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            Path(CONTROL_SOCKET).parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            Path(CONTROL_SOCKET).unlink(missing_ok=True)
+            self.command_socket.bind(CONTROL_SOCKET)
+            os.chmod(CONTROL_SOCKET, 0o600)
+            self.command_socket.listen(8)
+            self.command_socket.setblocking(False)
+        except Exception:
+            self.command_socket.close()
+            self.pwm.full_speed()
+            raise
         self.control_thread = threading.Thread(target=self._control_loop, name="fan-control", daemon=True)
         self.disk_thread = threading.Thread(target=self._disk_loop, name="disk-temperature", daemon=True)
         self.control_thread.start()
@@ -296,10 +368,14 @@ class FanService:
                 disk_temperature = max(disk_temperature, floor_temperature)
         disk_duty = self.curves["disk"].update(disk_temperature, now)
         main_duty = self.curves["main"].update(cpu, now)
-        if now - self.started_at < 2:
-            main_duty = disk_duty = 100  # Startup kick for two-wire fans.
+        self.overrides = {name: value for name, value in self.overrides.items() if value[1] > now}
+        main_duty = self.overrides.get("main", (main_duty,))[0]
+        disk_duty = self.overrides.get("disk", (disk_duty,))[0]
         state = {"main": main_duty, "disk": disk_duty,
-                 "convection": max(main_duty, disk_duty), **disk_state}
+                 "convection": self.overrides.get("convection", (max(main_duty, disk_duty),))[0],
+                 **disk_state}
+        if now - self.started_at < 2:
+            state.update(dict.fromkeys(FAN_CHANNELS, 100))  # Startup kick.
         for name in FAN_CHANNELS:
             self.pwm.set(name, state[name])
         with self.guard:
@@ -309,6 +385,7 @@ class FanService:
     def _control_loop(self):
         while not self.stop_event.is_set():
             try:
+                self._poll_command()
                 self.step(time.monotonic())
             except Exception as error:
                 with self.guard:
@@ -324,9 +401,66 @@ class FanService:
     def stop(self):
         self.stop_event.set()
         self.control_thread.join(timeout=2)
+        if self.command_socket is not None:
+            self.command_socket.close()
+            Path(CONTROL_SOCKET).unlink(missing_ok=True)
         # Leave hardware PWM enabled at 100% while the service is stopped.
         errors = self.pwm.full_speed()
         if errors:
             print(f"Could not set all fans to full speed: {errors}", flush=True)
         if self.lock_file is not None:
             self.lock_file.close()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Temporarily override the running fan service (requires sudo)")
+    commands = parser.add_subparsers(dest="action", required=True)
+    set_parser = commands.add_parser("set", help="Override PWM; automatically expires after 300 seconds")
+    set_parser.add_argument("settings", nargs="+", metavar="FAN PWM",
+                            help="Pairs such as main 60 disk 70 convection 80, or all 60")
+    set_parser.add_argument("--seconds", type=int, default=300)
+    auto_parser = commands.add_parser("auto", help="Cancel overrides immediately")
+    auto_parser.add_argument("fan", choices=[*FAN_CHANNELS, "all"], nargs="?", default="all")
+    commands.add_parser("status", help="Show last applied PWM and active overrides")
+    args = parser.parse_args(argv)
+    if args.action == "set" and not 1 <= args.seconds <= 86400:
+        parser.error("--seconds must be between 1 and 86400")
+    request = vars(args).copy()
+    if args.action == "set":
+        settings = request.pop("settings")
+        if len(settings) % 2:
+            parser.error("set expects FAN PWM pairs")
+        duties = {}
+        for fan, raw_percent in zip(settings[::2], settings[1::2]):
+            if fan not in (*FAN_CHANNELS, "all"):
+                parser.error(f"Unknown fan: {fan}")
+            try:
+                percent = int(raw_percent)
+            except ValueError:
+                parser.error("PWM must be an integer from 0 to 100")
+            if not 0 <= percent <= 100:
+                parser.error("PWM must be an integer from 0 to 100")
+            if fan == "all" and len(settings) != 2:
+                parser.error("Use all alone, or specify individual fans")
+            names = list(FAN_CHANNELS) if fan == "all" else [fan]
+            for name in names:
+                if name in duties:
+                    parser.error(f"Duplicate fan: {name}")
+                duties[name] = percent
+        request["duties"] = duties
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(CONTROL_SOCKET)
+            client.sendall((json.dumps(request) + "\n").encode())
+            with client.makefile("r") as response:
+                result = json.loads(response.readline(65536))
+        if not result.get("ok"):
+            parser.exit(1, f"Fan command failed: {result.get('error')}\n")
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Cannot contact fan service: {error}. Use sudo and check rpi_support is running.\n")
+
+
+if __name__ == "__main__":
+    main()
